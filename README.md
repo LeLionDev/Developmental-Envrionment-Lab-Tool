@@ -25,8 +25,9 @@ client  <--reads status.json--  shared dir  <--exports----  server
 
 ## Requirements
 
-Everything here is Python standard library only -- no `pip install` needed to run the server
-or the client from source. Tested against Python 3.
+The shared-directory mode is Python standard library only -- no `pip install` needed to run the
+server or the client from source. The optional SSH transport (see below) needs
+[paramiko](https://www.paramiko.org/): `pip install paramiko`. Tested against Python 3.
 
 ## Setup
 
@@ -107,15 +108,60 @@ The toolbar above the labs has three buttons:
   machine. Windows only.
 - **Stay on Top** -- toggles whether the window keeps reasserting itself above other windows.
 
-## SSH connection test (experimental)
+## Optional: sending requests over SSH
 
-`ssh_connection_test.py` is a standalone script for checking that a lab machine is reachable
-over SSH and accepts commands. Unlike the rest of the tool it needs
-[paramiko](https://www.paramiko.org/) (`pip install paramiko`).
+Polling a network share is slow (up to a few seconds per request) and a client never learns
+whether its request actually won. If clients can reach the server machine over the network,
+you can turn on the SSH transport: the server runs a small built-in SSH listener (paramiko, no
+system `sshd` needed), and clients send each request as JSON over that connection. Requests are
+applied immediately and the reply carries the result plus the current lab status, so the
+window updates right away.
+
+Add these keys to `poor_man.json` (the same keys work for the server and the clients):
+
+```json
+{
+    "poor_man_ssh_host": "lab-server.example.com",
+    "poor_man_ssh_port": 2222,
+    "poor_man_ssh_username": "lab_tool",
+    "poor_man_ssh_password": "pick-a-shared-secret",
+    "poor_man_ssh_host_key_fingerprint": "SHA256:..."
+}
+```
+
+- `poor_man_ssh_host` -- the server machine's hostname/IP as clients see it. Its presence is
+  what turns SSH on, for both the server (starts the listener) and the clients.
+- `poor_man_ssh_port` -- port to listen on / connect to. Defaults to `2222`; it must be open
+  between clients and the server.
+- `poor_man_ssh_username` / `poor_man_ssh_password` -- one shared login that clients use
+  (defaults to user `lab_tool`; a password is required). The lab user is still taken from the
+  JSON request, exactly as with the file queue.
+- `poor_man_ssh_host_key_fingerprint` -- optional but recommended. On first start the server
+  generates a host key (next to the db, or at `poor_man_ssh_host_key` if set) and logs its
+  fingerprint to `poor_man.log`; paste it here so clients refuse to talk to anything else.
+- `poor_man_ssh_listen_address` -- server-only, optional; defaults to `0.0.0.0`.
+
+The shared directory keeps working alongside SSH: the server still polls it and still writes
+`status.json`, and a client falls back to it automatically whenever SSH is unreachable, so
+clients can be moved over one at a time.
+
+The protocol is one JSON object per exec'd command, answered with one JSON line:
 
 ```
-python3 ssh_connection_test.py HOST -u USER                        # runs "echo ssh-ok"
-python3 ssh_connection_test.py HOST -u USER -c hostname -c uptime  # run specific commands
+{"action": "checkout", "user": "Jane Doe", "lab": "labA", "timestamp": "..."}
+-> {"ok": true, "message": "Jane Doe checked out labA", "status": {"labA": "Jane Doe", ...}}
+```
+
+Actions are `checkout`, `release`, and `status` (read-only). The exit status is `0` when `ok`
+is true and `1` otherwise.
+
+### Testing the SSH connection by hand
+
+`ssh_connection_test.py` connects to any SSH server and runs commands, which makes it handy for
+poking the lab server directly:
+
+```
+SSH_PASSWORD=... python3 ssh_connection_test.py lab-server -p 2222 -u lab_tool -c '{"action": "status"}'
 python3 ssh_connection_test.py HOST -u USER -i                     # interactive command prompt
 ```
 
@@ -127,8 +173,10 @@ connect).
 ## Running the tests
 
 ```
-python3 -m unittest tests.test_server -v
+python3 -m unittest tests.test_server tests.test_ssh -v
 ```
+
+The SSH tests are skipped if paramiko isn't installed.
 
 ## Packaging the client as a standalone `.exe`
 
@@ -136,7 +184,7 @@ The client (not the server) can be packaged into a single-file Windows executabl
 no Python installation to run, using [PyInstaller](https://pyinstaller.org/):
 
 ```
-pip install pyinstaller
+pip install pyinstaller paramiko
 pyinstaller --onefile --windowed --name "PoorManLabTool" poor_man_lab_tool.py
 ```
 

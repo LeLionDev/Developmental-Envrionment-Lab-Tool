@@ -153,6 +153,40 @@ class PoorManServerTestCase(unittest.TestCase):
             ["init.json", "status.json"],
         )
 
+    def test_apply_request_reports_result(self):
+        result = self.server.apply_request({
+            "action": "checkout", "user": "alice", "lab": "lab1", "timestamp": "t1",
+        })
+        self.assertEqual(result, {"ok": True, "message": "alice checked out lab1"})
+
+        result = self.server.apply_request({
+            "action": "checkout", "user": "bob", "lab": "lab1", "timestamp": "t2",
+        })
+        self.assertFalse(result["ok"])
+
+    def test_checkout_by_current_occupant_is_ok(self):
+        request = {"action": "checkout", "user": "alice", "lab": "lab1", "timestamp": "t1"}
+        self.server.apply_request(request)
+
+        self.assertTrue(self.server.apply_request(request)["ok"])
+        self.assertEqual(self.lab_row("lab1"), ("alice", "t1"))
+
+    def test_handle_request_returns_status_and_exports_snapshot(self):
+        response = self.server.handle_request({
+            "action": "checkout", "user": "alice", "lab": "lab1", "timestamp": "t1",
+        })
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["status"], {"lab1": "alice", "lab2": None})
+        with open(os.path.join(self.queue_dir, "status.json")) as f:
+            self.assertEqual(json.load(f), {"lab1": "alice", "lab2": None})
+
+    def test_handle_request_status_action_changes_nothing(self):
+        response = self.server.handle_request({"action": "status"})
+
+        self.assertEqual(response, {"ok": True, "message": "status", "status": {"lab1": None, "lab2": None}})
+        self.assertFalse(os.path.exists(os.path.join(self.queue_dir, "status.json")))
+
 
 if __name__ == "__main__":
     unittest.main()

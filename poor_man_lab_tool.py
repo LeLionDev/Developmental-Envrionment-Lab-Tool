@@ -1,9 +1,11 @@
 import functools
 import json
 import os
+import queue
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from datetime import datetime
 from tkinter import *
@@ -22,6 +24,17 @@ with open(CONFIG_PATH) as f:
 ROOT_DIR = _config["poor_man_message_queue_root"]
 STATUS_PATH = os.path.join(ROOT_DIR, "status.json")
 LAST_MODIFIED = None
+LAST_STATUS = None
+
+# When poor_man.json has SSH settings, requests and status go straight to the server over
+# SSH; the shared directory is still used as a fallback if SSH is unavailable.
+SSH_CLIENT = None
+if _config.get("poor_man_ssh_host"):
+    try:
+        import poor_man_ssh
+        SSH_CLIENT = poor_man_ssh.SSHLabClient.from_config(_config)
+    except ImportError:
+        print("paramiko is not installed; using the shared directory instead of SSH")
 
 WINDOW_CORNERS = ("top_left", "top_right", "bottom_left", "bottom_right")
 DEFAULT_WINDOW_CORNER = "bottom_right"
@@ -158,13 +171,9 @@ def load_status():
     with open(STATUS_PATH) as f:
         return json.load(f)
 
-def write_request(lab, action):
-    request = {
-        "action": action,
-        "user": CURRENT_USER,
-        "lab": lab,
-        "timestamp": datetime.now().isoformat(),
-    }
+status_updates = queue.Queue()
+
+def write_request(request):
     uid = uuid.uuid4().hex
     tmp_path = os.path.join(ROOT_DIR, f".req_{uid}.tmp")
     final_path = os.path.join(ROOT_DIR, f"req_{uid}.json")
@@ -172,9 +181,29 @@ def write_request(lab, action):
         json.dump(request, f)
     os.replace(tmp_path, final_path)
 
+def submit_request(lab, action):
+    request = {
+        "action": action,
+        "user": CURRENT_USER,
+        "lab": lab,
+        "timestamp": datetime.now().isoformat(),
+    }
+    if SSH_CLIENT is not None:
+        try:
+            response = SSH_CLIENT.send(request)
+            print(response.get("message"))
+            status_updates.put(response["status"])
+            return
+        except Exception as e:
+            print(f"SSH request failed, falling back to shared directory: {e}")
+    write_request(request)
+
 def handle_click(lab, action, button):
+    global LAST_STATUS
     button.config(state="disabled")
-    threading.Thread(target=write_request, args=(lab, action), daemon=True).start()
+    # Force the next status to be applied even if unchanged, so a rejected request re-enables the button.
+    LAST_STATUS = None
+    threading.Thread(target=submit_request, args=(lab, action), daemon=True).start()
 
 AVAILABLE_BG = "#2e7d32"
 OCCUPIED_BG = "#c62828"
@@ -216,26 +245,55 @@ def update_lab_widgets(status):
             occupant_label.config(text=occupant)
             button.config(text="Occupied", state="disabled")
 
-def refresh_status():
+def read_status_file_if_changed():
     global LAST_MODIFIED
+    modified = os.path.getmtime(STATUS_PATH) if os.path.exists(STATUS_PATH) else None
+    if modified == LAST_MODIFIED:
+        return None
+    status = load_status()
+    LAST_MODIFIED = modified
+    return status
+
+def fetch_status():
+    if SSH_CLIENT is not None:
+        try:
+            return SSH_CLIENT.status()
+        except Exception as e:
+            print(f"SSH status failed, falling back to shared directory: {e}")
+    return read_status_file_if_changed()
+
+def poll_status_forever():
+    # Runs off the UI thread so a slow share or SSH timeout can't freeze the window.
+    while True:
+        try:
+            status = fetch_status()
+            if status is not None:
+                status_updates.put(status)
+        except Exception as e:
+            print(f"refresh_status failed: {e}")
+        time.sleep(3)
+
+def refresh_status():
+    global LAST_STATUS
 
     try:
-        modified = os.path.getmtime(STATUS_PATH) if os.path.exists(STATUS_PATH) else None
-        if modified != LAST_MODIFIED:
-            status = load_status()
-            if status is not None:
-                if not lab_widgets:
-                    build_lab_widgets(status)
-                else:
-                    update_lab_widgets(status)
-                    apply_window_geometry()
-            LAST_MODIFIED = modified
+        status = None
+        while not status_updates.empty():
+            status = status_updates.get_nowait()
+        if status is not None and status != LAST_STATUS:
+            if not lab_widgets:
+                build_lab_widgets(status)
+            else:
+                update_lab_widgets(status)
+                apply_window_geometry()
+            LAST_STATUS = status
     except Exception as e:
         print(f"refresh_status failed: {e}")
     finally:
-        root.after(3000, refresh_status)
+        root.after(200, refresh_status)
 
 
+threading.Thread(target=poll_status_forever, daemon=True).start()
 refresh_status()
 apply_window_geometry()
 reassert_topmost()
