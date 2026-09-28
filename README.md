@@ -107,6 +107,23 @@ The toolbar above the labs has three buttons:
   machine. Windows only.
 - **Stay on Top** -- toggles whether the window keeps reasserting itself above other windows.
 
+## SSH connection test (experimental)
+
+`ssh_connection_test.py` is a standalone script for checking that a lab machine is reachable
+over SSH and accepts commands. Unlike the rest of the tool it needs
+[paramiko](https://www.paramiko.org/) (`pip install paramiko`).
+
+```
+python3 ssh_connection_test.py HOST -u USER                        # runs "echo ssh-ok"
+python3 ssh_connection_test.py HOST -u USER -c hostname -c uptime  # run specific commands
+python3 ssh_connection_test.py HOST -u USER -i                     # interactive command prompt
+```
+
+Auth uses `--key`, then your SSH agent / `~/.ssh` keys, then a password (`SSH_PASSWORD` env var
+or `--ask-password`). Unknown host keys are accepted with a warning unless `--strict-host-keys`
+is passed. The exit code is the last command's exit status (2 = auth failed, 3 = couldn't
+connect).
+
 ## Running the tests
 
 ```
