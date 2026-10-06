@@ -1,40 +1,40 @@
 import functools
-import json
 import os
+import queue
 import subprocess
 import sys
 import threading
-import uuid
 from datetime import datetime
 from tkinter import *
 
+import client_config
 import get_user
+import messages
+import ssh_setup_dialog
+import transports
 from _version import __version__
 
 def app_dir():
+    """Directory holding the script, or the .exe when running as a PyInstaller build."""
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
 CONFIG_PATH = sys.argv[1] if len(sys.argv) > 1 else os.path.join(app_dir(), "poor_man.json")
-with open(CONFIG_PATH) as f:
-    _config = json.load(f)
-ROOT_DIR = _config["poor_man_message_queue_root"]
-STATUS_PATH = os.path.join(ROOT_DIR, "status.json")
-LAST_MODIFIED = None
+_config = client_config.load_config(CONFIG_PATH)
+TRANSPORT_MODE = client_config.get_transport_mode(_config)
+USES_SSH = TRANSPORT_MODE == client_config.TRANSPORT_SSH
 
 WINDOW_CORNERS = ("top_left", "top_right", "bottom_left", "bottom_right")
 DEFAULT_WINDOW_CORNER = "bottom_right"
-WINDOW_CORNER = _config.get("poor_man_window_corner", DEFAULT_WINDOW_CORNER)
+WINDOW_CORNER = _config.get(client_config.WINDOW_CORNER_KEY, DEFAULT_WINDOW_CORNER)
 if WINDOW_CORNER not in WINDOW_CORNERS:
     WINDOW_CORNER = DEFAULT_WINDOW_CORNER
 
 def save_window_corner(corner):
-    _config["poor_man_window_corner"] = corner
-    tmp_path = CONFIG_PATH + ".tmp"
-    with open(tmp_path, "w") as f:
-        json.dump(_config, f, indent=4)
-    os.replace(tmp_path, CONFIG_PATH)
+    """Remember the chosen window corner in poor_man.json so it survives restarts."""
+    _config[client_config.WINDOW_CORNER_KEY] = corner
+    client_config.save_config(CONFIG_PATH, _config)
 
 CURRENT_USER = get_user.get_display_name()
 
@@ -42,15 +42,36 @@ root = Tk(className="Lab Tools")
 title = f"Lab Tools {__version__}"
 root.title(title)
 
+def prompt_and_save_ssh_connection():
+    """Ask the user for gateway/host, save them to poor_man.json. Returns False if cancelled."""
+    global _config
+    current = client_config.get_ssh_settings(_config)
+    entered = ssh_setup_dialog.ask_ssh_connection(root, current)
+    if entered is None:
+        return False
+    _config = client_config.with_ssh_connection(_config, entered.gateway, entered.host, entered.user)
+    client_config.save_config(CONFIG_PATH, _config)
+    return True
+
+# First launch in SSH mode: collect the connection details before showing the lab window.
+if USES_SSH and client_config.validate_ssh_settings(client_config.get_ssh_settings(_config)):
+    root.withdraw()
+    if not prompt_and_save_ssh_connection():
+        root.destroy()
+        sys.exit(0)
+    root.deiconify()
+
 topmost_enabled = True
 
 def reassert_topmost():
+    """Periodically re-raise the window above others while Stay on Top is enabled."""
     if topmost_enabled:
         root.attributes("-topmost", False)
         root.attributes("-topmost", True)
     root.after(3000, reassert_topmost)
 
 def apply_window_geometry():
+    """Size the window to its contents and snap it to the configured screen corner."""
     root.update_idletasks()
 
     window_width = root.winfo_reqwidth()
@@ -68,12 +89,14 @@ def apply_window_geometry():
 corner_picker = None
 
 def close_corner_picker():
+    """Close the corner picker popup if it is open."""
     global corner_picker
     if corner_picker is not None:
         corner_picker.destroy()
         corner_picker = None
 
 def move_to_corner(corner):
+    """Snap the window to a new corner and persist the choice."""
     global WINDOW_CORNER
     WINDOW_CORNER = corner
     save_window_corner(corner)
@@ -81,6 +104,7 @@ def move_to_corner(corner):
     apply_window_geometry()
 
 def show_corner_picker():
+    """Toggle the small popup that lets the user pick a screen corner."""
     global corner_picker
     if corner_picker is not None:
         close_corner_picker()
@@ -116,19 +140,23 @@ def show_corner_picker():
     corner_picker.focus_set()
 
 def run_background_command(args):
+    """Run a shell command on a worker thread and print its output."""
     def _run():
+        """Worker body: run the command without a console window and print the result."""
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         result = subprocess.run(args, capture_output=True, text=True, creationflags=creationflags)
         print((result.stdout or result.stderr).strip())
     threading.Thread(target=_run, daemon=True).start()
 
 def kill_all_rdp():
+    """Force-close every Remote Desktop (mstsc.exe) window. Windows only."""
     if not sys.platform.startswith("win32"):
         print("Kill All RDP: only supported on Windows")
         return
     run_background_command(["taskkill", "/IM", "mstsc.exe", "/F"])
 
 def toggle_topmost():
+    """Switch Stay on Top on or off and update the button label."""
     global topmost_enabled
     topmost_enabled = not topmost_enabled
     root.attributes("-topmost", topmost_enabled)
@@ -146,40 +174,80 @@ kill_rdp_btn.pack(side="right", fill="y", padx=2)
 topmost_btn = Button(toolbar, text=" 📌 Stay on Top: ON ", command=toggle_topmost, bg="#2e2e2e", fg="white", bd=0, highlightthickness=0, activebackground="#4a4a4a", activeforeground="white")
 topmost_btn.pack(side="right", fill="y", padx=2)
 
+LIVE_FG = "#66bb6a"
+RECONNECTING_FG = "#ffa726"
+connection_label = None
+
+def edit_ssh_connection():
+    """Let the user change gateway/host, then reconnect the status stream with the new values."""
+    if prompt_and_save_ssh_connection():
+        stop_status_watch()
+        start_status_watch()
+
+if USES_SSH:
+    connection_btn = Button(toolbar, text=" ⚙ Connection ", command=edit_ssh_connection, bg="#2e2e2e", fg="white", bd=0, highlightthickness=0, activebackground="#4a4a4a", activeforeground="white")
+    connection_btn.pack(side="right", fill="y", padx=2)
+
+    # Fixed width so switching between "Live" and "Reconnecting" never resizes the toolbar.
+    connection_label = Label(toolbar, text=" ● Connecting ", width=16, anchor="w", bg="#2e2e2e", fg=RECONNECTING_FG)
+    connection_label.pack(side="left", fill="y", padx=2)
+
 lab_widgets = {}
 
 placeholder_label = Label(root, text="Waiting for server...", anchor="w")
 placeholder_label.grid(row=1, column=0, padx=(15, 15), pady=8, sticky="w")
 
-def load_status():
-    if not os.path.exists(STATUS_PATH):
-        return None
+# Background threads (status watcher, request sender) never touch widgets directly --
+# Tkinter is not thread-safe. They post (generation, kind, payload) events onto this queue,
+# and process_ui_events drains it on the GUI thread.
+ui_events = queue.Queue()
+transport = None
+watch_stop = None
+watch_generation = 0
+last_status = None
 
-    with open(STATUS_PATH) as f:
-        return json.load(f)
+def start_status_watch():
+    """Create the configured transport and start streaming status on a background thread."""
+    global transport, watch_stop, watch_generation
+    watch_generation += 1
+    generation = watch_generation
+    transport = transports.create_transport(_config)
+    watch_stop = threading.Event()
+    threading.Thread(
+        target=transport.watch_status,
+        args=(
+            lambda status: ui_events.put((generation, "status", status)),
+            lambda problem: ui_events.put((generation, "problem", problem)),
+            watch_stop,
+        ),
+        daemon=True,
+    ).start()
 
-def write_request(lab, action):
-    request = {
-        "action": action,
-        "user": CURRENT_USER,
-        "lab": lab,
-        "timestamp": datetime.now().isoformat(),
-    }
-    uid = uuid.uuid4().hex
-    tmp_path = os.path.join(ROOT_DIR, f".req_{uid}.tmp")
-    final_path = os.path.join(ROOT_DIR, f"req_{uid}.json")
-    with open(tmp_path, "w") as f:
-        json.dump(request, f)
-    os.replace(tmp_path, final_path)
+def stop_status_watch():
+    """Stop the current status watcher and release its connection."""
+    if watch_stop is not None:
+        watch_stop.set()
+    if transport is not None:
+        transport.close()
+
+def send_request(lab, action):
+    """Deliver a checkout/release request; runs on a worker thread so the GUI never freezes."""
+    request = messages.build_request(action, CURRENT_USER, lab, datetime.now().isoformat())
+    try:
+        transport.send_request(request)
+    except Exception as e:
+        ui_events.put((watch_generation, "send_failed", f"{action} {lab} failed: {e}"))
 
 def handle_click(lab, action, button):
+    """Disable the clicked button until the next status update, then send the request."""
     button.config(state="disabled")
-    threading.Thread(target=write_request, args=(lab, action), daemon=True).start()
+    threading.Thread(target=send_request, args=(lab, action), daemon=True).start()
 
 AVAILABLE_BG = "#2e7d32"
 OCCUPIED_BG = "#c62828"
 
 def build_lab_widgets(status):
+    """Create one column of widgets per lab the first time a status snapshot arrives."""
     placeholder_label.grid_forget()
     toolbar.grid_configure(columnspan=len(status))
     for i, lab in enumerate(sorted(status)):
@@ -198,6 +266,7 @@ def build_lab_widgets(status):
     apply_window_geometry()
 
 def update_lab_widgets(status):
+    """Recolour and relabel each lab's widgets to match the snapshot."""
     for lab, (name_label, occupant_label, button) in lab_widgets.items():
         occupant = status.get(lab)
 
@@ -216,27 +285,64 @@ def update_lab_widgets(status):
             occupant_label.config(text=occupant)
             button.config(text="Occupied", state="disabled")
 
-def refresh_status():
-    global LAST_MODIFIED
+def apply_status(status):
+    """Show a new snapshot: build the lab widgets the first time, update them afterwards."""
+    global last_status
+    last_status = status
+    if not lab_widgets:
+        build_lab_widgets(status)
+    else:
+        update_lab_widgets(status)
+        apply_window_geometry()
+    if connection_label is not None:
+        connection_label.config(text=" ● Live ", fg=LIVE_FG)
 
+def show_problem(message):
+    """Report a connection problem without interrupting the user."""
+    print(message)
+    if connection_label is not None:
+        connection_label.config(text=" ● Reconnecting ", fg=RECONNECTING_FG)
+    if not lab_widgets:
+        placeholder_label.config(text=f"Waiting for server... ({message})")
+
+def handle_send_failure(message):
+    """A request never reached the server: report it and re-enable the buttons."""
+    print(message)
+    if connection_label is not None:
+        connection_label.config(text=" ⚠ Request failed ", fg=RECONNECTING_FG)
+    if last_status is not None:
+        update_lab_widgets(last_status)
+
+def process_ui_events():
+    """Apply every event posted by background threads, ignoring ones from a replaced watcher."""
     try:
-        modified = os.path.getmtime(STATUS_PATH) if os.path.exists(STATUS_PATH) else None
-        if modified != LAST_MODIFIED:
-            status = load_status()
-            if status is not None:
-                if not lab_widgets:
-                    build_lab_widgets(status)
-                else:
-                    update_lab_widgets(status)
-                    apply_window_geometry()
-            LAST_MODIFIED = modified
-    except Exception as e:
-        print(f"refresh_status failed: {e}")
+        while True:
+            generation, kind, payload = ui_events.get_nowait()
+            if generation != watch_generation:
+                continue
+            try:
+                if kind == "status":
+                    apply_status(payload)
+                elif kind == "problem":
+                    show_problem(payload)
+                elif kind == "send_failed":
+                    handle_send_failure(payload)
+            except Exception as e:
+                print(f"Failed to handle {kind} event: {e}")
+    except queue.Empty:
+        pass
     finally:
-        root.after(3000, refresh_status)
+        root.after(200, process_ui_events)
+
+def on_close():
+    """Close the status connection cleanly before the window goes away."""
+    stop_status_watch()
+    root.destroy()
 
 
-refresh_status()
+root.protocol("WM_DELETE_WINDOW", on_close)
+start_status_watch()
+process_ui_events()
 apply_window_geometry()
 reassert_topmost()
 

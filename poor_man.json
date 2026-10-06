@@ -2,5 +2,11 @@
     "poor_man_message_queue_root": "/path/to/your/root/dir",
     "poor_man_message_init_config": "/path/to/your/root/dir/init.json",
     "poor_man_db_path": "/path/to/your/db/dir/poor_man.db",
-    "poor_man_window_corner": "bottom_right"
+    "poor_man_window_corner": "bottom_right",
+    "poor_man_transport": "filesystem",
+    "poor_man_ssh_gateway": "",
+    "poor_man_ssh_host": "",
+    "poor_man_ssh_user": "",
+    "poor_man_ssh_port": 22,
+    "poor_man_ssh_receiver_command": "python3 /path/to/server/dir/ssh_receiver.py /path/to/server/dir/poor_man.json"
 }

@@ -23,6 +23,11 @@ client  --writes req_*.json-->  shared dir  --polled by-->  server  --writes--> 
 client  <--reads status.json--  shared dir  <--exports----  server
 ```
 
+Clients that cannot reach the shared directory can instead connect **over SSH** through a
+jump host (see [Connecting over SSH](#connecting-over-ssh)). A small receiver script on the
+server side turns SSH traffic into the very same `req_*.json` / `status.json` files, so the
+server itself works identically for both kinds of client.
+
 ## Requirements
 
 Everything here is Python standard library only -- no `pip install` needed to run the server
@@ -62,6 +67,10 @@ for your environment:
     "poor_man_window_corner": "bottom_right"
 }
 ```
+
+(The template also contains `poor_man_transport` and `poor_man_ssh_*` keys; leave
+`poor_man_transport` as `"filesystem"` unless you are setting up
+[SSH clients](#connecting-over-ssh).)
 
 - `poor_man_message_queue_root` -- the shared directory from step 1.
 - `poor_man_message_init_config` -- path to the `init.json` from step 2.
@@ -107,11 +116,79 @@ The toolbar above the labs has three buttons:
   machine. Windows only.
 - **Stay on Top** -- toggles whether the window keeps reasserting itself above other windows.
 
+## Connecting over SSH
+
+For clients that can't mount the shared directory, the client can reach the server through
+an SSH jump host (gateway) instead. Shared-directory clients are unaffected and both kinds
+can be used at the same time.
+
+```
+client --ssh -J gateway host "ssh_receiver.py submit"--> receiver --writes req_*.json--> server
+client <--one long-lived "ssh_receiver.py watch" stream-- receiver <--reads status.json-- server
+```
+
+### How it works
+
+- **Requests:** each Check Out / Release runs one short `ssh` call to `ssh_receiver.py
+  submit`, which validates the JSON and drops it into the queue as a normal `req_*.json`.
+- **Status:** the client keeps a single `ssh` connection open to `ssh_receiver.py watch`,
+  which sends a line whenever `status.json` changes (checked once a second on the server's
+  local disk), so updates appear within about a second of the server applying them.
+- **Dropped connections:** ssh's keep-alives detect a dead connection within ~45 s; the
+  client then reconnects automatically, waiting 1, 2, 4 ... up to 60 s (with a little
+  randomness so clients don't all reconnect at once). The toolbar shows **● Live** or
+  **● Reconnecting**.
+- **Abandoned streams:** the receiver sends a heartbeat every 15 s; if the client has gone
+  the write fails and the receiver exits, so nothing is left running on the server.
+
+### Server-side setup
+
+1. Copy `ssh_receiver.py` and `messages.py` next to `poor_man_server.py` on the receiving
+   host (the receiver uses the same `poor_man.json` as the server).
+2. Make sure every user who will connect can log in to the gateway and the receiving host
+   with an SSH key (no password prompt) and can write to the queue directory.
+3. Check it by hand from a client machine:
+
+   ```
+   ssh -J <gateway> <host> "python3 /path/to/ssh_receiver.py /path/to/poor_man.json status"
+   ```
+
+### Client-side setup
+
+In the client's `poor_man.json` set:
+
+- `poor_man_transport` -- `"ssh"`.
+- `poor_man_ssh_receiver_command` -- the command that runs the receiver on the receiving
+  host, e.g. `python3 /path/to/ssh_receiver.py /path/to/poor_man.json`. This is normally
+  filled in once by whoever runs the server and distributed with the client.
+- `poor_man_ssh_port` -- optional, the receiving host's SSH port (default 22).
+
+Leave `poor_man_ssh_gateway`, `poor_man_ssh_host` and `poor_man_ssh_user` empty: on first
+launch the client asks for the gateway, receiving host and (optional) username, and saves
+them to its local `poor_man.json`. No hostnames need to be checked into this repository. To
+change them later use the **⚙ Connection** toolbar button.
+
+A gateway on a non-standard port can be entered as `gateway:2222`. The username, if given,
+is used for both the gateway and the receiving host; leave it empty to use your local login
+name or whatever your `~/.ssh/config` specifies.
+
+### Requirements and notes
+
+- Uses the system `ssh` client (built into Windows 10 1809+ and Linux); nothing to install.
+- Runs ssh with `BatchMode=yes`, so key-based login is required; a password prompt fails
+  with an error shown in the toolbar rather than hanging the window.
+- New host keys are accepted the first time (`StrictHostKeyChecking=accept-new`); a key
+  that later changes is refused.
+- Each connected client holds one long-lived SSH session through the gateway.
+
 ## Running the tests
 
 ```
-python3 -m unittest tests.test_server -v
+python3 -m unittest discover -s tests -t . -v
 ```
+
+`tests/test_ssh_integration.py` runs the real receiver in real processes behind a
+stand-in `ssh` script (no network needed) and is skipped on Windows.
 
 ## Packaging the client as a standalone `.exe`
 
