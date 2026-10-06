@@ -1,0 +1,29 @@
+# Test builds for pull requests.
+#
+# Every push to a pull request targeting master runs the tests and produces downloadable
+# executables labelled pr-<number>-<sha>, so changes can be tested end to end before they
+# are merged. Nothing is released and master is not touched.
+name: PR test build
+
+on:
+  pull_request:
+    branches: [master]
+    paths-ignore:
+      - '**.md'
+      - 'assets/**'
+
+# A new push to the same PR cancels the build still running for the previous push.
+concurrency:
+  group: pr-build-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-executables.yml
+    with:
+      version: pr-${{ github.event.pull_request.number }}
+      append_sha: true
+      retention_days: 14
