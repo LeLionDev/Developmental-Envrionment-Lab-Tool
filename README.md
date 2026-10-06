@@ -205,6 +205,30 @@ This has to be built on a Windows machine (PyInstaller doesn't cross-compile). T
 `poor_man.json` in the same folder, and nothing else needs to be installed on the machines
 that run it. Building and running it both work without admin rights.
 
+## Test builds and releases (GitHub Actions)
+
+You normally don't build by hand -- GitHub Actions builds both executables for you:
+
+| Workflow | Runs when | Produces | Label in title bar |
+|---|---|---|---|
+| **PR test build** (`pr-build.yml`) | every push to a pull request into `master` | downloadable test executables, kept 14 days | `pr-<number>-<commit>` |
+| **Release** (`release.yml`) | a `v*` tag is pushed | a *draft* GitHub release with the executables | the tag, e.g. `v1.3.0` |
+| **Build executables** (`build-executables.yml`) | "Run workflow" in the Actions tab, on any branch | downloadable executables, kept 90 days | `dev-<commit>` |
+
+All three run the unit tests on Windows and Linux first and only build if they pass.
+
+Recommended flow for a change:
+
+1. Work on a feature branch and open a **draft pull request** into `master`.
+2. Every push builds a test executable. Open the run from the PR's checks, download
+   `PoorManLabTool-windows-pr-…` from the run summary, and test it end to end. The title bar
+   shows exactly which commit you are running.
+3. Push fixes as needed; each push produces a fresh build.
+4. When end-to-end testing passes, mark the PR ready, review and merge. Merging does
+   **not** create a release.
+5. To release, tag `master` (`git tag v1.3.0 && git push origin v1.3.0`), check the draft
+   release the workflow creates, and press Publish.
+
 ## Notes and known limitations (v1)
 
 - Checkout is first-come-first-served; a lab can only be released by whoever currently holds

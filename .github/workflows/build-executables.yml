@@ -1,21 +1,57 @@
+# Runs the tests, then builds the client executables for Windows and Linux.
+#
+# This is the one place the build is defined. It is used three ways:
+#   - pr-build.yml calls it for every pull request (test builds, labelled pr-<number>-<sha>)
+#   - release.yml calls it for every v* tag (release builds, labelled with the tag)
+#   - "Run workflow" in the Actions tab builds any branch on demand (labelled dev-<sha>)
+# The label is stamped into _version.py, so it shows in the client's title bar and you can
+# always tell which build you are testing.
 name: Build executables
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - 'v*'
+  workflow_call:
+    inputs:
+      version:
+        description: "Build label (e.g. v1.2.0, or pr-12, which gets the commit sha appended)"
+        type: string
+        required: true
+      append_sha:
+        description: "Append the short commit sha to the label"
+        type: boolean
+        default: false
+      retention_days:
+        description: "How long to keep the uploaded executables"
+        type: number
+        default: 90
 
 jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -t . -v
+
   build:
+    needs: test
     strategy:
       matrix:
         include:
           - os: windows-latest
-            artifact_name: PoorManLabTool-windows
+            platform: windows
             artifact_path: dist/PoorManLabTool.exe
           - os: ubuntu-latest
-            artifact_name: PoorManLabTool-linux
+            platform: linux
             artifact_path: dist/PoorManLabTool
     runs-on: ${{ matrix.os }}
     steps:
@@ -28,34 +64,47 @@ jobs:
       - name: Install PyInstaller
         run: pip install pyinstaller
 
-      - name: Stamp version
-        if: startsWith(github.ref, 'refs/tags/')
+      # For pull requests github.sha is a temporary merge commit, so label the build with
+      # the PR's own head commit instead -- that is the commit you will see on the PR.
+      - name: Work out build label
+        id: label
         shell: bash
-        run: echo "__version__ = \"${GITHUB_REF_NAME}\"" > _version.py
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          APPEND_SHA: ${{ inputs.append_sha }}
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [ -z "$INPUT_VERSION" ]; then
+            label="dev-${COMMIT_SHA::7}"
+          elif [ "$APPEND_SHA" = "true" ]; then
+            label="${INPUT_VERSION}-${COMMIT_SHA::7}"
+          else
+            label="$INPUT_VERSION"
+          fi
+          echo "value=$label" >> "$GITHUB_OUTPUT"
+
+      - name: Stamp version
+        shell: bash
+        env:
+          LABEL: ${{ steps.label.outputs.value }}
+        run: echo "__version__ = \"$LABEL\"" > _version.py
 
       - name: Build executable
         run: pyinstaller PoorManLabTool.spec
 
       - uses: actions/upload-artifact@v4
+        id: upload
         with:
-          name: ${{ matrix.artifact_name }}
+          name: PoorManLabTool-${{ matrix.platform }}-${{ steps.label.outputs.value }}
           path: ${{ matrix.artifact_path }}
+          retention-days: ${{ inputs.retention_days || 90 }}
 
-  release:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist-artifacts
-
-      - name: Create draft release
-        uses: softprops/action-gh-release@v2
-        with:
-          draft: true
-          files: |
-            dist-artifacts/PoorManLabTool-windows/PoorManLabTool.exe
-            dist-artifacts/PoorManLabTool-linux/PoorManLabTool
+      - name: Add download link to the run summary
+        shell: bash
+        env:
+          LABEL: ${{ steps.label.outputs.value }}
+          PLATFORM: ${{ matrix.platform }}
+          URL: ${{ steps.upload.outputs.artifact-url }}
+        run: |
+          echo "### $PLATFORM build \`$LABEL\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "[Download PoorManLabTool-$PLATFORM-$LABEL]($URL)" >> "$GITHUB_STEP_SUMMARY"

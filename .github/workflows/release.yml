@@ -1,0 +1,38 @@
+# Release builds.
+#
+# Pushing a v* tag (e.g. v1.3.0) on master runs the tests, builds executables stamped with
+# the tag, and creates a *draft* GitHub release with them attached. Nothing is public until
+# you review the draft and press Publish.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-executables.yml
+    with:
+      version: ${{ github.ref_name }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # Both executables have different file names, so they can be merged into one folder.
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist-artifacts
+          pattern: PoorManLabTool-*
+          merge-multiple: true
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: |
+            dist-artifacts/PoorManLabTool.exe
+            dist-artifacts/PoorManLabTool
